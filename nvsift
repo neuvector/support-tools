@@ -1,0 +1,129 @@
+#!/bin/bash
+#set -x
+
+### nvsift ###
+### nvsift will parse the NeuVector support-bundle and produces a quick brief output for review ###
+### 2020.02.13 - rev 1 ###
+
+## COMMANDS
+for i in egrep file gzip head jq tee; do
+    command -v $i >/dev/null 2>&1 || { echo >&2 "Command $i required but it's not installed.  Aborting."; exit 1; }
+done
+
+## VARIABLES
+FILETYPE=
+PARSECMD=
+DATA=
+
+## CONSTANTS
+COMMAND=`basename $0`
+LOGFILE=$1
+
+## FUNCTIONS
+cleanup () {
+    unset DATA
+    exit 0
+}
+
+usage () {
+        echo "Usage: `basename $0` {v4+ NVSUPPORT FILE}"
+        exit 1
+}
+
+ftype () {
+    FILETYPE=`file $1 | egrep -o "gzip|ASCII"`
+    if [ "$FILETYPE" == "gzip" ]; then
+        PARSECMD="gzip -dc"
+    elif [ "$FILETYPE" == "ASCII" ]; then
+        PARSECMD="cat"
+    else
+        echo "Cannot handle spaces in file path/name OR Unexpected file type, quiting."
+        exit 1
+    fi
+}
+
+nvkeys () {
+    echo $DATA | jq -r keys[]
+}
+
+nvinfo () {
+    echo "\"File\": \"$LOGFILE\""
+    $PARSECMD $LOGFILE | head -n2 | egrep -o '\".+\"'
+}
+
+nvsummary () {
+    echo -e "\n>>SUMMARY<<"
+    echo $DATA | jq -r '.summary' | grep -v null
+    echo -e "\n>>LICENSE<<"
+    echo $DATA | jq -r '.license' | grep -v null
+    # echo -e "\n>>SYNC<<"
+    # echo $DATA | jq -r '.sync' | grep -v null
+    # echo -e "\n>>STATS<<"
+    # echo $DATA | jq -r '.stats' | grep -v null
+    # echo -e "\n>>INTERNAL_SUBNETS<<"
+    # echo $DATA | jq -c '.internal_subnets' | grep -v null
+}
+
+nvhost () {
+    echo -e "\n>>HOSTS<<"
+    echo -e "Name | IP | OS | Kernel | Storage Driver | Runtime | CPU | Memory(GiB) | Containers"
+    echo $DATA | jq -r '.hosts[]?|"\(.name)" + "|" + "\(.interfaces|.[]|.[0].ip)" + "|" + "\(.os)" + "|" + "\(.kernel)" + "|" + "\(.storage_driver)" + "|" + "\(.runtime)" + "|" + "\(.cpus)" + "|" + "\(.memory/1073741824)" + "|" + "\(.containers)"' | tee /dev/tty | wc -l; echo "Count  ^ - WARNING: count may be higher due to multi-home hosts."
+}
+
+nvctrl () {
+    echo -e "\n>>CONTROLLERS<<"
+    echo -e "Version | Joined At | Name | Cluster IP | Hostname | Leader | State"
+    echo $DATA | jq -r '.controllers[]?|"\(.version)" + "|" + "\(.joined_at)" + "|" + "\(.display_name)" + "|" + "\(.cluster_ip)" + "|" + "\(.host_name)" + "|" + "\(.leader)" + "|" + "\(.connection_state)"' | tee /dev/tty | wc -l; echo "Count  ^"
+}
+
+nvenforcer () {
+    echo -e "\n>>ENFORCERS<<"
+    echo -e "Version | Joined At | Name | Cluster IP | Hostname | State"
+    echo $DATA | jq -r '.enforcers[]?|"\(.version)" + "|" + "\(.joined_at)" + "|" + "\(.display_name)" + "|" + "\(.cluster_ip)" + "|" + "\(.host_name)" + "|" + "\(.connection_state)"' | tee /dev/tty | wc -l; echo "Count  ^"
+}
+
+nvscanner () {
+    echo -e "\n>>SCANNERS<<"
+    echo -e "CVEDB Created | CVEDB Version | ID | Scanned Containers | Scanned Hosts | Scanned Images | Scanned Serverless | Server"
+    echo $DATA | jq -r '.scanners[]?|"\(.cvedb_create_time)" + "|" + "\(.cvedb_version)" + "|" + "\(.id)" + "|" + "\(.scanned_containers)" + "|" + "\(.scanned_hosts)" + "|" + "\(.scanned_images)" + "|" + "\(.scanned_serverless)" + "|" + "\(.server)"' | tee /dev/tty | wc -l; echo "Count  ^"
+}
+
+nveventctrl () {
+    echo -e "\n>>CONTROLLER EVENT GROUP<<"
+    #echo $DATA | jq -r '."/v1/log/event".events[] | select(.category=="CONTROLLER") | "\(.reported_at)" + "|" + "\(.controller_name)" + "|" + "\(.name)" + "|" + "\(.message)"'
+    echo $DATA | jq -r '.events[]? | select(.category=="CONTROLLER") | "\(.reported_at)" + "|" + "\(.name)"' | awk -F '[T|]' '{print $1,$3}' | sort | uniq -c
+}
+
+nveventenf () {
+    echo -e "\n>>ENFORCER EVENT GROUP<<"
+    #echo $DATA | jq -r '."/v1/log/event".events[] | select(.category=="ENFORCER") | "\(.reported_at)" + "|" + "\(.enforcer_name)" + "|" + "\(.name)" + "|" + "\(.message)"'
+    echo $DATA | jq -r '.events[]? | select(.category=="ENFORCER") | "\(.reported_at)" + "|" + "\(.name)"' | awk -F '[T|]' '{print $1,$3}' | sort | uniq -c
+}
+
+## MAIN
+trap "cleanup" SIGINT
+
+if [ -z "$LOGFILE" ]; then
+    usage
+    exit 1
+fi
+
+ftype $LOGFILE
+LOGTYPE=$($PARSECMD $LOGFILE | grep -E -o /v1/fed/cluster/[0-9a-f]\+/v1 | head -1)
+if [[ "$LOGTYPE" =~ "fed" ]]; then
+    echo ">>>>>>>>>>>>>>>>>>>> Federated <<<<<<<<<<<<<<<<<<<<"
+    PREFIX=$LOGTYPE
+else
+    PREFIX="/v1"
+fi
+
+DATA=$($PARSECMD $LOGFILE | jq '."'"$PREFIX/system/summary"'",."'"$PREFIX/system/license"'",."'"$PREFIX/debug/controller/sync"'",."'"$PREFIX/debug/system/stats"'",."'"$PREFIX/host"'",."'"$PREFIX/controller"'",."'"$PREFIX/enforcer"'",."'"$PREFIX/scan/scanner"'",."'"$PREFIX/log/event"'"')
+
+nvinfo
+nvsummary
+nvhost
+nvctrl
+nvenforcer
+nvscanner
+nveventctrl
+nveventenf
